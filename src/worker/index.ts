@@ -9,6 +9,7 @@ type Env = {
   DB: D1Database;
   R2_BUCKET: R2Bucket;
   TURNSTILE_SECRET_KEY?: string;
+  JWT_SECRET?: string;
 };
 
 
@@ -16,8 +17,8 @@ const app = new Hono<{ Bindings: Env; Variables: { user?: any } }>();
 
 app.use("/*", cors());
 
-// JWT Secret - In production, use environment variable
-const JWT_SECRET = "your-secret-key-change-in-production";
+// JWT Secret - Read from Cloudflare secret (set via: npx wrangler secret put JWT_SECRET)
+const getJwtSecret = (c: any) => c.env.JWT_SECRET || "your-secret-key-change-in-production";
 
 // Auth middleware
 const authMiddleware = async (c: any, next: any) => {
@@ -28,7 +29,7 @@ const authMiddleware = async (c: any, next: any) => {
 
   const token = authHeader.substring(7);
   try {
-    const payload = await verify(token, JWT_SECRET);
+    const payload = await verify(token, getJwtSecret(c));
     c.set("user", payload);
     await next();
   } catch (err) {
@@ -99,7 +100,7 @@ app.post("/api/auth/login", async (c) => {
 
   const token = await sign(
     { id: user.id, username: user.username, role: user.role },
-    JWT_SECRET
+    getJwtSecret(c)
   );
 
   return c.json({
