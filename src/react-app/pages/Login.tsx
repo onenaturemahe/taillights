@@ -14,6 +14,8 @@ export default function LoginPage() {
     const [error, setError] = useState("");
     const [loading, setLoading] = useState(false);
     const [turnstileToken, setTurnstileToken] = useState("");
+    const turnstileSiteKey = import.meta.env.VITE_TURNSTILE_SITE_KEY;
+    const isTurnstileConfigured = Boolean(turnstileSiteKey);
     const { login } = useAuth();
     const navigate = useNavigate();
 
@@ -23,6 +25,9 @@ export default function LoginPage() {
         setLoading(true);
 
         try {
+            if (!isTurnstileConfigured) {
+                throw new Error("Turnstile is not configured. Please contact an administrator.");
+            }
             await login(username, password, turnstileToken);
             navigate("/");
         } catch (err: any) {
@@ -80,15 +85,23 @@ export default function LoginPage() {
                             </div>
                         )}
                         <div className="flex justify-center py-2">
-                            <Turnstile
-                                siteKey={import.meta.env.VITE_TURNSTILE_SITE_KEY || "1x00000000000000000000AA"}
-                                onSuccess={(token: string) => setTurnstileToken(token)}
-                            />
+                            {isTurnstileConfigured ? (
+                                <Turnstile
+                                    siteKey={turnstileSiteKey}
+                                    onSuccess={(token: string) => setTurnstileToken(token)}
+                                    onExpire={() => setTurnstileToken("")}
+                                    onError={() => setTurnstileToken("")}
+                                />
+                            ) : (
+                                <div className="text-xs text-red-600 bg-red-50 dark:bg-red-950/50 px-3 py-2 rounded-md">
+                                    Turnstile is not configured.
+                                </div>
+                            )}
                         </div>
                         <Button
                             type="submit"
                             className="w-full bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700"
-                            disabled={loading}
+                            disabled={loading || !isTurnstileConfigured || !turnstileToken}
                         >
                             {loading ? (
                                 <>

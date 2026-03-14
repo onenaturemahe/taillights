@@ -254,9 +254,9 @@ export default function AdminPage() {
                                         type="password"
                                         value={newPassword}
                                         onChange={(e) => setNewPassword(e.target.value)}
-                                        placeholder="Enter password (min 6 chars)"
+                                        placeholder="Enter password (min 8 chars)"
                                         required
-                                        minLength={6}
+                                        minLength={8}
                                         disabled={creating}
                                     />
                                 </div>
@@ -355,17 +355,17 @@ export default function AdminPage() {
                                                     <div className="flex items-center gap-2 mt-1 pt-2 border-t">
                                                         <Input
                                                             type="password"
-                                                            placeholder="New password (min 6 chars)"
+                                                            placeholder="New password (min 8 chars)"
                                                             value={resetPassword}
                                                             onChange={(e) => setResetPassword(e.target.value)}
                                                             className="h-8 text-sm"
-                                                            minLength={6}
+                                                            minLength={8}
                                                             autoFocus
                                                         />
                                                         <Button
                                                             size="sm"
                                                             className="h-8"
-                                                            disabled={resetting || resetPassword.length < 6}
+                                                            disabled={resetting || resetPassword.length < 8}
                                                             onClick={() => handleResetPassword(u.id)}
                                                         >
                                                             {resetting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}

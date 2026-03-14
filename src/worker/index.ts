@@ -1,6 +1,7 @@
 import { Hono } from "hono";
-import { cors } from "hono/cors";
 import { sign, verify } from "hono/jwt";
+import { z } from "zod";
+import { zValidator } from "@hono/zod-validator";
 
 import * as jpeg from "jpeg-js";
 import * as bcrypt from "bcryptjs";
@@ -9,15 +10,147 @@ type Env = {
   DB: D1Database;
   TURNSTILE_SECRET_KEY?: string;
   JWT_SECRET?: string;
+  BOOTSTRAP_TOKEN?: string;
+  ALLOWED_ORIGINS?: string;
+  ENVIRONMENT?: string;
+  TOKEN_TTL_SECONDS?: string;
 };
 
 
 const app = new Hono<{ Bindings: Env; Variables: { user?: any } }>();
 
-app.use("/*", cors());
+const PASSWORD_MIN_LENGTH = 8;
+const USERNAME_MIN_LENGTH = 3;
+const USERNAME_MAX_LENGTH = 64;
+const DEFAULT_TOKEN_TTL_SECONDS = 60 * 60 * 8; // 8 hours
+const MAX_BASE64_IMAGE_CHARS = 1_500_000; // ~1.1MB binary after base64 overhead
+const MAX_STRING_FIELD_CHARS = 200;
+const MAX_JSON_BODY_BYTES = 2_500_000; // 2.5MB cap for JSON payloads
+const RATE_LIMIT_WINDOW_SECONDS = 10 * 60;
+const LOGIN_RATE_LIMIT_MAX = 10;
+const BOOTSTRAP_RATE_LIMIT_MAX = 3;
+
+const isProduction = (env: Env) =>
+  (env.ENVIRONMENT || "development").toLowerCase() === "production";
+
+const getTokenTtlSeconds = (env: Env) => {
+  const raw = env.TOKEN_TTL_SECONDS ? Number(env.TOKEN_TTL_SECONDS) : NaN;
+  return Number.isFinite(raw) && raw > 300 ? raw : DEFAULT_TOKEN_TTL_SECONDS;
+};
 
 // JWT Secret - Read from Cloudflare secret (set via: npx wrangler secret put JWT_SECRET)
-const getJwtSecret = (c: any) => c.env.JWT_SECRET || "your-secret-key-change-in-production";
+const getJwtSecret = (c: any) => {
+  const secret = c.env.JWT_SECRET;
+  if (!secret) {
+    if (isProduction(c.env)) {
+      throw new Error("JWT_SECRET is not configured");
+    }
+    console.warn("JWT_SECRET missing; using insecure dev fallback");
+    return "dev-insecure-secret";
+  }
+  if (isProduction(c.env) && secret.length < 32) {
+    throw new Error("JWT_SECRET must be at least 32 characters");
+  }
+  return secret;
+};
+
+const getTurnstileSecret = (c: any) => {
+  const secret = c.env.TURNSTILE_SECRET_KEY;
+  if (!secret) {
+    if (isProduction(c.env)) {
+      throw new Error("TURNSTILE_SECRET_KEY is not configured");
+    }
+    return null;
+  }
+  return secret;
+};
+
+const getAllowedOrigins = (env: Env) =>
+  (env.ALLOWED_ORIGINS || "")
+    .split(",")
+    .map((o) => o.trim())
+    .filter(Boolean);
+
+const isOriginAllowed = (origin: string, env: Env, host?: string | null) => {
+  const allowed = getAllowedOrigins(env);
+  if (allowed.length === 0) {
+    if (!isProduction(env)) return true;
+    if (!origin) return true;
+    if (host) {
+      const expected = `https://${host}`;
+      return origin === expected;
+    }
+    return false;
+  }
+  return allowed.includes(origin);
+};
+
+// CORS + preflight handling
+app.use("/*", async (c, next) => {
+  const origin = c.req.header("Origin");
+  const host = c.req.header("Host");
+  if (origin && isOriginAllowed(origin, c.env, host)) {
+    c.header("Access-Control-Allow-Origin", origin);
+    c.header("Vary", "Origin");
+    c.header("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
+    c.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    c.header("Access-Control-Max-Age", "86400");
+  } else if (origin && isProduction(c.env)) {
+    return c.json({ error: "CORS not allowed" }, 403);
+  }
+
+  if (c.req.method === "OPTIONS") {
+    return c.text("", 204);
+  }
+
+  await next();
+});
+
+// Basic request size guard (best-effort, relies on Content-Length)
+app.use("/api/*", async (c, next) => {
+  if (["POST", "PUT", "PATCH"].includes(c.req.method)) {
+    const length = c.req.header("Content-Length");
+    if (length && Number(length) > MAX_JSON_BODY_BYTES) {
+      return c.json({ error: "Request payload too large" }, 413);
+    }
+  }
+  await next();
+});
+
+// Security headers
+app.use("/*", async (c, next) => {
+  await next();
+
+  const csp = [
+    "default-src 'self'",
+    "base-uri 'self'",
+    "object-src 'none'",
+    "frame-ancestors 'none'",
+    "form-action 'self'",
+    "img-src 'self' data: https:",
+    "script-src 'self' https://challenges.cloudflare.com",
+    "style-src 'self' 'unsafe-inline'",
+    "font-src 'self' data:",
+    "connect-src 'self' https: https://challenges.cloudflare.com",
+    "frame-src https://challenges.cloudflare.com",
+  ].join("; ");
+
+  c.header("Content-Security-Policy", csp);
+  c.header("X-Content-Type-Options", "nosniff");
+  c.header("X-Frame-Options", "DENY");
+  c.header("Referrer-Policy", "strict-origin-when-cross-origin");
+  c.header("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+
+  if (isProduction(c.env)) {
+    c.header("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload");
+  }
+});
+
+// Prevent caching of auth responses
+app.use("/api/auth/*", async (c, next) => {
+  await next();
+  c.header("Cache-Control", "no-store");
+});
 
 // Auth middleware
 const authMiddleware = async (c: any, next: any) => {
@@ -28,8 +161,24 @@ const authMiddleware = async (c: any, next: any) => {
 
   const token = authHeader.substring(7);
   try {
-    const payload = await verify(token, getJwtSecret(c));
-    c.set("user", payload);
+    const payload: any = await verify(token, getJwtSecret(c));
+    const now = Math.floor(Date.now() / 1000);
+    if (!payload?.exp || payload.exp < now) {
+      return c.json({ error: "Token expired" }, 401);
+    }
+    if (!payload?.id) {
+      return c.json({ error: "Invalid token" }, 401);
+    }
+
+    const dbUser: any = await c.env.DB.prepare(
+      "SELECT id, username, role FROM users WHERE id = ?"
+    ).bind(payload.id).first();
+
+    if (!dbUser) {
+      return c.json({ error: "User not found" }, 401);
+    }
+
+    c.set("user", dbUser);
     await next();
   } catch (err) {
     return c.json({ error: "Invalid token" }, 401);
@@ -56,19 +205,147 @@ const moderatorMiddleware = async (c: any, next: any) => {
 
 const VALID_ROLES = ["user", "moderator", "admin"];
 
-// Auth routes
-app.post("/api/auth/login", async (c) => {
+const loginSchema = z.object({
+  username: z.string().trim().min(USERNAME_MIN_LENGTH).max(USERNAME_MAX_LENGTH),
+  password: z.string().min(1).max(128),
+  turnstileToken: z.string().optional(),
+});
+
+const registerSchema = z.object({
+  username: z.string().trim().min(USERNAME_MIN_LENGTH).max(USERNAME_MAX_LENGTH),
+  password: z.string().min(PASSWORD_MIN_LENGTH).max(128),
+  role: z.string().optional(),
+});
+
+const resetPasswordSchema = z.object({
+  password: z.string().min(PASSWORD_MIN_LENGTH).max(128),
+});
+
+const updateRoleSchema = z.object({
+  role: z.string().min(1),
+});
+
+const bootstrapSchema = z.object({
+  token: z.string().min(1),
+  username: z.string().trim().min(USERNAME_MIN_LENGTH).max(USERNAME_MAX_LENGTH),
+  password: z.string().min(PASSWORD_MIN_LENGTH).max(128),
+});
+
+const photoUrlSchema = z
+  .string()
+  .trim()
+  .optional()
+  .nullable()
+  .refine((val) => {
+    if (!val) return true;
+    if (val.startsWith("data:image")) {
+      return val.length <= MAX_BASE64_IMAGE_CHARS;
+    }
+    return val.length <= 2048;
+  }, "Invalid or oversized photo_url");
+
+const animalSchema = z.object({
+  photo_url: photoUrlSchema,
+  animal_type: z.enum(["Dog", "Cat", "Other"]),
+  name: z.string().trim().min(1).max(MAX_STRING_FIELD_CHARS),
+  age: z.preprocess((val) => Number(val), z.number().int().min(0).max(50)),
+  gender: z.enum(["Male", "Female"]),
+  is_neutered: z.boolean(),
+  vaccination_status: z.enum(["Fully Vaccinated", "Partially Vaccinated", "Not Vaccinated"]),
+  area_of_living: z.string().trim().min(1).max(MAX_STRING_FIELD_CHARS),
+  nature: z.enum(["Approachable", "Approach with Caution", "Aggressive"]),
+  college_campus: z.string().trim().min(1).max(MAX_STRING_FIELD_CHARS),
+  caregiver_name: z.string().trim().max(MAX_STRING_FIELD_CHARS).optional().nullable(),
+  caregiver_email: z.string().trim().max(MAX_STRING_FIELD_CHARS).optional().nullable(),
+  caregiver_mobile: z.string().trim().max(30).optional().nullable(),
+});
+
+const getClientIp = (c: any) => {
+  const cf = c.req.header("CF-Connecting-IP");
+  if (cf) return cf;
+  const xff = c.req.header("X-Forwarded-For");
+  if (xff) return xff.split(",")[0].trim();
+  return "unknown";
+};
+
+const enforceRateLimit = async (
+  c: any,
+  key: string,
+  max: number,
+  windowSeconds: number
+) => {
   const db = c.env.DB;
-  const { username, password, turnstileToken } = await c.req.json();
+  const now = Math.floor(Date.now() / 1000);
+  const ip = getClientIp(c);
+  const bucketKey = `${key}:${ip}`;
+
+  const existing: any = await db.prepare(
+    "SELECT count, window_start FROM rate_limits WHERE key = ?"
+  ).bind(bucketKey).first();
+
+  if (!existing) {
+    await db.prepare(
+      "INSERT INTO rate_limits (key, count, window_start) VALUES (?, ?, ?)"
+    ).bind(bucketKey, 1, now).run();
+    return null;
+  }
+
+  const elapsed = now - Number(existing.window_start || 0);
+  if (elapsed >= windowSeconds) {
+    await db.prepare(
+      "UPDATE rate_limits SET count = ?, window_start = ? WHERE key = ?"
+    ).bind(1, now, bucketKey).run();
+    return null;
+  }
+
+  if (Number(existing.count) >= max) {
+    const retryAfter = Math.max(1, windowSeconds - elapsed);
+    c.header("Retry-After", String(retryAfter));
+    return c.json({ error: "Too many requests. Please try again later." }, 429);
+  }
+
+  await db.prepare(
+    "UPDATE rate_limits SET count = count + 1 WHERE key = ?"
+  ).bind(bucketKey).run();
+
+  if (Math.random() < 0.01) {
+    const staleBefore = now - windowSeconds * 10;
+    await db.prepare(
+      "DELETE FROM rate_limits WHERE window_start < ?"
+    ).bind(staleBefore).run();
+  }
+
+  return null;
+};
+
+// Auth routes
+app.post("/api/auth/login", zValidator("json", loginSchema), async (c) => {
+  const db = c.env.DB;
+  const { username, password, turnstileToken } = c.req.valid("json");
+
+  const rateLimited = await enforceRateLimit(
+    c,
+    "login",
+    LOGIN_RATE_LIMIT_MAX,
+    RATE_LIMIT_WINDOW_SECONDS
+  );
+  if (rateLimited) return rateLimited;
 
   // Verify Turnstile Token if secret key is provided
-  if (c.env.TURNSTILE_SECRET_KEY) {
+  let turnstileSecret: string | null;
+  try {
+    turnstileSecret = getTurnstileSecret(c);
+  } catch (err) {
+    return c.json({ error: "Captcha not configured" }, 500);
+  }
+
+  if (turnstileSecret) {
     if (!turnstileToken) {
       return c.json({ error: "Please complete the 'not a robot' check" }, 400);
     }
 
     const formData = new FormData();
-    formData.append("secret", c.env.TURNSTILE_SECRET_KEY);
+    formData.append("secret", turnstileSecret);
     formData.append("response", turnstileToken);
     formData.append("remoteip", c.req.header("CF-Connecting-IP") || "");
 
@@ -97,8 +374,15 @@ app.post("/api/auth/login", async (c) => {
     return c.json({ error: "Invalid credentials" }, 401);
   }
 
+  const now = Math.floor(Date.now() / 1000);
   const token = await sign(
-    { id: user.id, username: user.username, role: user.role },
+    {
+      id: user.id,
+      username: user.username,
+      role: user.role,
+      iat: now,
+      exp: now + getTokenTtlSeconds(c.env),
+    },
     getJwtSecret(c)
   );
 
@@ -113,9 +397,48 @@ app.get("/api/auth/me", authMiddleware, async (c) => {
   return c.json({ user });
 });
 
-app.post("/api/auth/register", authMiddleware, adminMiddleware, async (c) => {
+// Bootstrap admin creation (one-time). Requires BOOTSTRAP_TOKEN secret.
+app.post("/api/auth/bootstrap", zValidator("json", bootstrapSchema), async (c) => {
   const db = c.env.DB;
-  const { username, password, role } = await c.req.json();
+  const { token, username, password } = c.req.valid("json");
+
+  const rateLimited = await enforceRateLimit(
+    c,
+    "bootstrap",
+    BOOTSTRAP_RATE_LIMIT_MAX,
+    RATE_LIMIT_WINDOW_SECONDS
+  );
+  if (rateLimited) return rateLimited;
+
+  if (!c.env.BOOTSTRAP_TOKEN) {
+    return c.json({ error: "Bootstrap disabled" }, 403);
+  }
+  if (token !== c.env.BOOTSTRAP_TOKEN) {
+    return c.json({ error: "Invalid bootstrap token" }, 403);
+  }
+
+  const existing: any = await db.prepare(
+    "SELECT COUNT(*) as count FROM users"
+  ).first();
+  if (existing?.count > 0) {
+    return c.json({ error: "Users already exist" }, 409);
+  }
+
+  const passwordHash = await bcrypt.hash(password, 10);
+  const result = await db.prepare(
+    "INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)"
+  ).bind(username, passwordHash, "admin").run();
+
+  const newUser: any = await db.prepare(
+    "SELECT id, username, role, created_at FROM users WHERE id = ?"
+  ).bind(result.meta.last_row_id).first();
+
+  return c.json({ user: newUser }, 201);
+});
+
+app.post("/api/auth/register", authMiddleware, adminMiddleware, zValidator("json", registerSchema), async (c) => {
+  const db = c.env.DB;
+  const { username, password, role } = c.req.valid("json");
 
   // Validate role
   const assignedRole = role || "user";
@@ -206,14 +529,10 @@ async function compressAndUpload(base64Data: string): Promise<string | null> {
 }
 
 // Update user password - Admin only
-app.patch("/api/auth/users/:id/password", authMiddleware, adminMiddleware, async (c) => {
+app.patch("/api/auth/users/:id/password", authMiddleware, adminMiddleware, zValidator("json", resetPasswordSchema), async (c) => {
   const db = c.env.DB;
   const id = c.req.param("id");
-  const { password } = await c.req.json();
-
-  if (!password || password.length < 6) {
-    return c.json({ error: "Password must be at least 6 characters" }, 400);
-  }
+  const { password } = c.req.valid("json");
 
   const passwordHash = await bcrypt.hash(password, 10);
   await db.prepare("UPDATE users SET password_hash = ? WHERE id = ?")
@@ -224,10 +543,10 @@ app.patch("/api/auth/users/:id/password", authMiddleware, adminMiddleware, async
 });
 
 // Update user role - Admin only
-app.patch("/api/auth/users/:id/role", authMiddleware, adminMiddleware, async (c) => {
+app.patch("/api/auth/users/:id/role", authMiddleware, adminMiddleware, zValidator("json", updateRoleSchema), async (c) => {
   const db = c.env.DB;
   const id = c.req.param("id");
-  const { role } = await c.req.json();
+  const { role } = c.req.valid("json");
 
   if (!role || !VALID_ROLES.includes(role)) {
     return c.json({ error: "Invalid role. Must be user, moderator, or admin" }, 400);
@@ -253,6 +572,8 @@ app.get("/api/animals", async (c) => {
     "SELECT * FROM animals ORDER BY created_at DESC"
   ).all();
 
+  c.header("Cache-Control", "public, max-age=60, s-maxage=300, stale-while-revalidate=300");
+
   return c.json(results.map((animal: any) => ({
     ...animal,
     caregiver_name: animal.caregiver_name_1,
@@ -276,6 +597,8 @@ app.get("/api/animals/:id", async (c) => {
     return c.json({ error: "Animal not found" }, 404);
   }
 
+  c.header("Cache-Control", "public, max-age=60, s-maxage=300, stale-while-revalidate=300");
+
   return c.json({
     ...animal,
     is_neutered: animal.is_neutered === 1,
@@ -288,12 +611,15 @@ app.get("/api/animals/:id", async (c) => {
 });
 
 // Create animal - Require authentication (User or Admin)
-app.post("/api/animals", authMiddleware, async (c) => {
+app.post("/api/animals", authMiddleware, zValidator("json", animalSchema), async (c) => {
   const db = c.env.DB;
-  const body = await c.req.json();
+  const body = c.req.valid("json");
 
   // Compress image to store as Base64 format in DB directly
   const photoUrl = await compressAndUpload(body.photo_url);
+  if (photoUrl && photoUrl.startsWith("data:image") && photoUrl.length > MAX_BASE64_IMAGE_CHARS) {
+    return c.json({ error: "Image too large. Please upload a smaller image." }, 413);
+  }
 
   const result = await db.prepare(`
     INSERT INTO animals (
@@ -337,13 +663,16 @@ app.post("/api/animals", authMiddleware, async (c) => {
 });
 
 // Update animal - Require moderator or admin
-app.put("/api/animals/:id", authMiddleware, moderatorMiddleware, async (c) => {
+app.put("/api/animals/:id", authMiddleware, moderatorMiddleware, zValidator("json", animalSchema), async (c) => {
   const db = c.env.DB;
   const id = c.req.param("id");
-  const body = await c.req.json();
+  const body = c.req.valid("json");
 
   // Compress image to store as Base64 format in DB directly
   const photoUrl = await compressAndUpload(body.photo_url);
+  if (photoUrl && photoUrl.startsWith("data:image") && photoUrl.length > MAX_BASE64_IMAGE_CHARS) {
+    return c.json({ error: "Image too large. Please upload a smaller image." }, 413);
+  }
 
   await db.prepare(`
     UPDATE animals SET

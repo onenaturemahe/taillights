@@ -10,8 +10,7 @@ CREATE TABLE users (
 -- Create index on username for faster lookups
 CREATE INDEX idx_users_username ON users(username);
 
--- Insert default admin user (username: admin, password: admin123)
--- Password hash generated with bcrypt (rounds: 10)
-INSERT INTO users (username, password_hash, role) VALUES 
-('admin', '$2b$10$Fd6nr4tLPeewR3zMXV41QOwpRhqKl4N.V0.W7RROCYC/7bQ9awRzW', 'admin');
+-- NOTE: Do NOT seed default admin credentials in production.
+-- Use the /api/auth/bootstrap endpoint with BOOTSTRAP_TOKEN, or create
+-- the initial admin user directly via a secure admin-only process.
 

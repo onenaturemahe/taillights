@@ -1,6 +1,6 @@
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
-	"name": "onenaturemahe",
+	"name": "onenature",
 	"main": "./src/worker/index.ts",
 	"compatibility_date": "2025-06-17",
 	"compatibility_flags": [
@@ -9,7 +9,7 @@
 	"observability": {
 		"enabled": true
 	},
-	"upload_source_maps": true,
+	"upload_source_maps": false,
 	"assets": {
 		"not_found_handling": "single-page-application"
 	},
@@ -21,6 +21,8 @@
 		}
 	],
 	"vars": {
-		"TURNSTILE_SECRET_KEY": "1x0000000000000000000000000000000AA"
+		"ENVIRONMENT": "production",
+		"ALLOWED_ORIGINS": "",
+		"TOKEN_TTL_SECONDS": "28800"
 	}
 }
