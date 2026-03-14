@@ -250,7 +250,7 @@ const animalSchema = z.object({
   name: z.string().trim().min(1).max(MAX_STRING_FIELD_CHARS),
   age: z.preprocess((val) => Number(val), z.number().int().min(0).max(50)),
   gender: z.enum(["Male", "Female"]),
-  is_neutered: z.boolean(),
+  is_neutered: z.union([z.boolean(), z.number().int().min(0).max(1)]),
   vaccination_status: z.enum(["Fully Vaccinated", "Partially Vaccinated", "Not Vaccinated"]),
   area_of_living: z.string().trim().min(1).max(MAX_STRING_FIELD_CHARS),
   nature: z.enum(["Approachable", "Approach with Caution", "Aggressive"]),
@@ -579,6 +579,7 @@ app.get("/api/animals", async (c) => {
 
   return c.json(results.map((animal: any) => ({
     ...animal,
+    is_neutered: animal.is_neutered === 1,
     caregiver_name: animal.caregiver_name_1,
     caregiver_mobile: animal.caregiver_mobile,
     caregiver_email: animal.caregiver_name_2,
