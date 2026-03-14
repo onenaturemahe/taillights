@@ -100,7 +100,7 @@ app.use("/*", async (c, next) => {
   }
 
   if (c.req.method === "OPTIONS") {
-    return c.text("", 204);
+    return c.body(null, 204);
   }
 
   await next();
@@ -493,9 +493,12 @@ app.delete("/api/auth/users/:id", authMiddleware, adminMiddleware, async (c) => 
 });
 
 // Helper to compress image and return as Base64 string directly
-async function compressAndUpload(base64Data: string): Promise<string | null> {
-  if (!base64Data || !base64Data.startsWith("data:image")) {
-    return base64Data; // Already a URL or null
+async function compressAndUpload(base64Data?: string | null): Promise<string | null> {
+  if (!base64Data) {
+    return base64Data ?? null;
+  }
+  if (!base64Data.startsWith("data:image")) {
+    return base64Data; // Already a URL
   }
 
   try {

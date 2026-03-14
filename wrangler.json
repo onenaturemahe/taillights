@@ -16,8 +16,9 @@
 	"d1_databases": [
 		{
 			"binding": "DB",
-			"database_name": "019c47b3-8c68-7500-821d-24c75a1d5010",
-			"database_id": "27e69794-5feb-4407-b283-dcf752a574bf"
+			"database_name": "onenature-db",
+			"database_id": "636f2f82-0e8a-4929-91db-0f17f849ef39",
+			"remote": true
 		}
 	],
 	"vars": {
