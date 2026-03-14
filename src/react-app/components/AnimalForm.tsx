@@ -59,6 +59,7 @@ export function AnimalForm({ animal, onSave, onCancel }: AnimalFormProps) {
   const [isCameraOpen, setIsCameraOpen] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
   const [stream, setStream] = useState<MediaStream | null>(null);
+  const [isUserFacing, setIsUserFacing] = useState(false);
 
   useEffect(() => {
     return () => {
@@ -70,8 +71,20 @@ export function AnimalForm({ animal, onSave, onCancel }: AnimalFormProps) {
 
   const startCamera = async () => {
     try {
-      const mediaStream = await navigator.mediaDevices.getUserMedia({ video: true });
+      let mediaStream: MediaStream;
+      try {
+        mediaStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: "environment" } },
+          audio: false,
+        });
+      } catch (err) {
+        mediaStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      }
+
       setStream(mediaStream);
+      const track = mediaStream.getVideoTracks()[0];
+      const settings = track?.getSettings?.();
+      setIsUserFacing(settings?.facingMode === "user");
       setIsCameraOpen(true);
       // Wait for state update and ref to be attached
       setTimeout(() => {
@@ -92,6 +105,7 @@ export function AnimalForm({ animal, onSave, onCancel }: AnimalFormProps) {
       stream.getTracks().forEach(track => track.stop());
       setStream(null);
     }
+    setIsUserFacing(false);
     setIsCameraOpen(false);
   };
 
@@ -111,9 +125,11 @@ export function AnimalForm({ animal, onSave, onCancel }: AnimalFormProps) {
       canvas.height = height;
       const ctx = canvas.getContext('2d');
       if (ctx) {
-        // Draw image to canvas, horizontally flipped to counter the video mirroring
-        ctx.translate(width, 0);
-        ctx.scale(-1, 1);
+        // Flip only for user-facing cameras (selfie) to counter the mirrored preview
+        if (isUserFacing) {
+          ctx.translate(width, 0);
+          ctx.scale(-1, 1);
+        }
         ctx.drawImage(videoRef.current, 0, 0, width, height);
         // Convert to data URL with JPEG compression
         const photoUrl = canvas.toDataURL('image/jpeg', 0.7);
@@ -155,7 +171,7 @@ export function AnimalForm({ animal, onSave, onCancel }: AnimalFormProps) {
                 autoPlay
                 playsInline
                 muted
-                className="w-full h-full object-cover transform scale-x-[-1]" // Mirror effect
+                className={`w-full h-full object-cover ${isUserFacing ? "transform scale-x-[-1]" : ""}`}
               />
               <div className="absolute bottom-4 left-0 right-0 flex justify-center gap-4 z-10">
                 <Button
